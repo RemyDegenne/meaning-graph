@@ -1,0 +1,8 @@
+name = "LeanDeps"
+version = "0.1.0"
+defaultTargets = ["LeanDeps"]
+
+# Deliberately dependency-free: a project that wants to compute what its declarations rest on should
+# not have to take on this repo's build (Verso, SubVerso, MD4Lean, …) to do so. Lean core only.
+[[lean_lib]]
+name = "LeanDeps"

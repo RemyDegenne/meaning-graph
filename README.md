@@ -1,0 +1,111 @@
+# LeanDeps
+
+What every declaration of a Lean project rests on: the constants its **type** uses, and the
+constants its type **and body** use — computed from the compiled environment, with the four things
+an elaborated term silently drops put back.
+
+Depends on Lean core and nothing else — no Lake, no document format, no notion of a "project
+directory" or of an output. It lives in the
+[`exposition`](https://github.com/LeanMachineLearning/exposition) repository, whose `referee` tool
+is its first consumer, but it is a separate Lake package precisely so that using the analysis does
+not drag in that tool's build (Verso, SubVerso, MD4Lean, …).
+
+## Why not just `Expr.getUsedConstants`
+
+Because the elaborated type and value of a declaration under-report what its *source* needs, in four
+ways this library compensates for:
+
+- **Compiler-generated helpers** — `_proof_N`, `match_N`, structure field defaults, well-founded
+  recursion helpers — are constants of the project itself, but nobody wrote them, and stopping at
+  such a name hides what it in turn depends on. `expandThroughInternals` recurses *through* them,
+  and only through them, so the answer is stated in terms of declarations a human wrote.
+- **`Expr.proj` nodes**: `Expr.foldConsts` walks through a projection without ever offering the
+  structure name it carries. `projStructureNames` recovers those names.
+- **Notation**: a notation's macro stores the constants it expands to as pre-resolved `Name` *data*
+  inside embedded `Syntax`, invisible to a constant walk. `notationExpansionDeps` reconstructs them.
+- **Coercions**: an elaborated term keeps only the underlying `@[coe]` function and drops the
+  instance — yet the instance is what makes the source's `↑`/`⇑` elaborate.
+  `coercionInstancesByType` recovers it.
+
+## Use
+
+Add the dependency:
+
+```toml
+# lakefile.toml
+[[require]]
+name = "LeanDeps"
+git = "https://github.com/LeanMachineLearning/exposition"
+rev = "main"
+subDir = "LeanDeps"
+```
+
+```lean
+-- lakefile.lean
+require LeanDeps from git
+  "https://github.com/LeanMachineLearning/exposition" @ "main" / "LeanDeps"
+```
+
+Then, given an `Environment` with the project's modules imported and the root module prefix that
+delimits it:
+
+```lean
+import LeanDeps
+
+open Lean LeanDeps
+
+def report (env : Environment) : IO Unit := do
+  for (name, d) in declDepsOf env `MyLibrary do
+    IO.println s!"{name}: {d.typeDeps.size} in the statement, {d.deps.size} in all"
+```
+
+`declDepsOf` is the one-shot form. For anything beyond a single pass, build the project-wide tables
+once and reuse them, since that is where the whole-environment work happens:
+
+```lean
+let ctx := Context.of env `MyLibrary
+let graph := ctx.allDeclDeps              -- Array (Name × DeclDeps)
+```
+
+`Context.declDeps` answers per declaration, threading an explicit `Cache`, when you want to drive
+the iteration yourself.
+
+### What you get per declaration
+
+`DeclDeps` has three fields, and the difference between them is the point:
+
+- `typeDeps` — what the **statement** mentions. For a theorem this is what a reader has to
+  understand to know what was claimed.
+- `deps` — the statement **and** the proof or body.
+- `dataDeps` — the statement and the body's *data*, with the proofs embedded inside the value
+  skipped. Equal to `deps` unless you asked for the extra analysis with
+  `(← Context.of env root |>.withDataValueConsts)`, which needs `MetaM` because deciding whether a
+  constructor field is `Prop`-valued is a typing question. This is the field that says what a
+  bundled structure instance *means*, without the lemmas its `left_inv` obligation happened to call.
+
+### Graph passes
+
+`reverseDeps` (who uses this) and `transitiveDeps` / `topologicalClosure` (everything this reaches,
+each dependency before its first use) are stated over plain `Name`-keyed maps rather than over
+`DeclDeps`, so the caller decides which edges count *before* running them:
+
+```lean
+-- Treat a theorem's proof as opaque; take the full body for everything else.
+let edges := graph.map fun (n, d) =>
+  (n, if (env.find? n).any (· matches .thmInfo _) then d.typeDeps else d.deps)
+let users := reverseDeps edges
+```
+
+The topological order is the order the declarations could be emitted into a single self-contained
+file. Cycles (mutual recursion) are tolerated rather than rejected.
+
+## Scope and limits
+
+- The analysis is over the **compiled environment**, not over source text. It sees what the
+  elaborator produced, which is why the four recoveries above exist at all — and it cannot see a
+  dependency that leaves no trace in the environment.
+- `rootPrefix` is what bounds the work: a constant is the project's own when the module declaring it
+  carries that prefix. Everything upstream is reported as a leaf and never expanded, so the cost is
+  proportional to your project, not to Mathlib.
+- Which declarations count as "the project's own user-written declarations" is `shouldExpose`.
+  Expansion stops at those; everything else generated by the compiler is looked through.
