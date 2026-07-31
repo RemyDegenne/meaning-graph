@@ -102,7 +102,7 @@ def internalComponentNames : List String :=
 
 /-- True if any component of `name` is an auxiliary component (`isAuxComponent`) or one of the
 compiler's auto-generated companion names (`internalComponentNames`). -/
-partial def isInternalName : Name → Bool
+def isInternalName : Name → Bool
   | .anonymous => false
   | .num p _ => isInternalName p
   | .str p s =>
@@ -118,16 +118,17 @@ This keys on the environment's `ctorInfo` rather than on the spelling of the pre
 these companions for *any* constructor name (`mk`, a custom `intro`, ...) while leaving a user
 declaration that merely happens to be named like a constructor (its prefix is not a `ctorInfo`)
 untouched. -/
-partial def hasConstructorPrefix (env : Environment) (name : Name) : Bool :=
+def hasConstructorPrefix (env : Environment) (name : Name) : Bool :=
   go name.getPrefix
 where
+  -- Matching the two non-empty constructors rather than calling `getPrefix` makes the recursion
+  -- structural, so this needs no `partial`. Same function: `(.str p _).getPrefix = p`.
   go : Name → Bool
     | .anonymous => false
-    | n =>
-      (match env.find? n with
-       | some (.ctorInfo _) => true
-       | _ => false)
-      || go n.getPrefix
+    | .str p s =>
+      (match env.find? (.str p s) with | some (.ctorInfo _) => true | _ => false) || go p
+    | .num p i =>
+      (match env.find? (.num p i) with | some (.ctorInfo _) => true | _ => false) || go p
 
 /-- True if `prefixName` is `n` itself or one of its dotted ancestors. This is a *component-wise*
 test, not a string prefix: the name `LMLExtra.Foo` does *not* have prefix `LML`. -/
@@ -211,23 +212,29 @@ The walk memoizes on the `Expr` nodes themselves so heavily-shared proof terms a
 `Expr.eqv`, so both are cheap. It is still ~3x the cost of core's `foldConsts` (which memoizes on
 a pointer set from unsafe code); that is immaterial here because only the target project's own
 constants are ever walked. -/
-partial def projStructureNames (e : Expr) : Array Name :=
+def projStructureNames (e : Expr) : Array Name :=
   (go e (#[], {})).1
 where
+  -- `e` is memoized *after* its subterms are walked, not before. Either order computes the same
+  -- thing — a term is never a strict subterm of itself, so a node being walked can never be
+  -- re-encountered inside its own walk — but marking it afterwards means the memo satisfies a
+  -- simple invariant throughout: everything in `seen` has already contributed its names to `acc`.
+  -- That is what `Proofs/Deps.lean` inducts on to show the memo loses nothing.
   go (e : Expr) (st : Array Name × Std.HashSet Expr) : Array Name × Std.HashSet Expr :=
     let (acc, seen) := st
     if seen.contains e then
       st
     else
-      let seen := seen.insert e
-      match e with
-      | .app f a => go a (go f (acc, seen))
-      | .lam _ t b _ => go b (go t (acc, seen))
-      | .forallE _ t b _ => go b (go t (acc, seen))
-      | .letE _ t v b _ => go b (go v (go t (acc, seen)))
-      | .mdata _ b => go b (acc, seen)
-      | .proj s _ b => go b (acc.push s, seen)
-      | _ => (acc, seen)
+      let (acc, seen) :=
+        match e with
+        | .app f a => go a (go f (acc, seen))
+        | .lam _ t b _ => go b (go t (acc, seen))
+        | .forallE _ t b _ => go b (go t (acc, seen))
+        | .letE _ t v b _ => go b (go v (go t (acc, seen)))
+        | .mdata _ b => go b (acc, seen)
+        | .proj s _ b => go b (acc.push s, seen)
+        | _ => (acc, seen)
+      (acc, seen.insert e)
 
 /-- Like `Expr.getUsedConstants`, but also reports the structure name of every `Expr.proj` node
 (see `projStructureNames` for why that name would otherwise be lost). -/
@@ -415,7 +422,7 @@ lost: this is a `partial` definition, so importers cannot unfold it either way. 
   | _ => none
 
 /-- Every `Name` value embedded anywhere in `e` (reconstructed via `evalNameExpr?`). -/
-partial def collectEmbeddedNames (e : Expr) : Array Name := Id.run do
+def collectEmbeddedNames (e : Expr) : Array Name := Id.run do
   let mut acc : Array Name := #[]
   if let some n := evalNameExpr? e then acc := acc.push n
   match e with
@@ -463,7 +470,7 @@ def coercionClasses : List Name :=
 
 /-- If `type` is, under its binders, a coercion-class application `Cls Src …`, the type coerced
 *from* (`Src`). -/
-partial def coercionSource? (type : Expr) : Option Expr :=
+def coercionSource? (type : Expr) : Option Expr :=
   match type with
   | .forallE _ _ b _ => coercionSource? b
   | _ =>
@@ -473,7 +480,7 @@ partial def coercionSource? (type : Expr) : Option Expr :=
 
 /-- If `type` is, under its binders, a coercion-class application `Cls Src …`, the head constant of
 `Src`. -/
-partial def coercionSourceType? (type : Expr) : Option Name :=
+def coercionSourceType? (type : Expr) : Option Name :=
   coercionSource? type >>= (·.getAppFn.constName?)
 
 /-- A coercion instance, together with the project constants that must be present for it to be
@@ -752,6 +759,31 @@ def reverseDeps (nodes : Array (Name × Array Name)) : Std.HashMap Name (Array N
         acc)
     {}
 
+/-- The walk state: which nodes have been entered, and the post-order emitted so far. -/
+abbrev VisitState := Std.HashSet Name × Array Name
+
+/-- The depth-first walk `topologicalClosure` runs, with an explicit `fuel` bounding the recursion
+*depth* so that this is a total definition rather than a `partial` one.
+
+Fuel is what makes the recursion structural. It is not a safety valve: `topologicalClosure` passes
+`depsMap.size + 1`, and `Proofs/Deps.lean` proves that is always enough — recursion descends only
+from a node that has dependencies, hence is a key of `depsMap`, and never twice from the same key,
+so the depth cannot exceed the number of keys. Running out is therefore unreachable, and the
+`0` case below is what a proof discharges rather than what a run relies on. -/
+def visitFuel (depsMap : Std.HashMap Name (Array Name)) :
+    Nat → VisitState → Name → VisitState
+  | 0, st, _ => st
+  | fuel + 1, (visited, order), n =>
+    if visited.contains n then
+      (visited, order)
+    else
+      -- Mark `n` before recursing so a dependency cycle cannot loop forever.
+      let visited := visited.insert n
+      let (visited, order) :=
+        (depsMap.getD n #[]).foldl (fun acc d => visitFuel depsMap fuel acc d) (visited, order)
+      -- Emit `n` only after all of its dependencies have been emitted.
+      (visited, order.push n)
+
 /-- Computes the declarations reachable from `start` via `depsMap`, in *topological* order: every
 declaration appears after all of the declarations it depends on (a depth-first post-order). This is
 the order in which the declarations could be emitted into a single self-contained Lean file, with
@@ -760,22 +792,9 @@ each definition preceding its first use.
 Cycles (e.g. mutual recursion) are tolerated: a node is marked visited on entry, so the walk
 terminates, and the members of a cycle come out in some arbitrary but otherwise dependency-respecting
 order. -/
-partial def topologicalClosure (depsMap : Std.HashMap Name (Array Name)) (start : Array Name) :
+def topologicalClosure (depsMap : Std.HashMap Name (Array Name)) (start : Array Name) :
     Array Name :=
-  (start.foldl (fun (acc : Std.HashSet Name × Array Name) n => visit acc.1 acc.2 n) ({}, #[])).2
-where
-  visit (visited : Std.HashSet Name) (order : Array Name) (n : Name) :
-      Std.HashSet Name × Array Name :=
-    if visited.contains n then
-      (visited, order)
-    else
-      -- Mark `n` before recursing so a dependency cycle cannot loop forever.
-      let visited := visited.insert n
-      let (visited, order) :=
-        (depsMap.getD n #[]).foldl
-          (fun (acc : Std.HashSet Name × Array Name) d => visit acc.1 acc.2 d) (visited, order)
-      -- Emit `n` only after all of its dependencies have been emitted.
-      (visited, order.push n)
+  (start.foldl (fun acc n => visitFuel depsMap (depsMap.size + 1) acc n) (({}, #[]) : VisitState)).2
 
 /-- The transitive closure of `name`'s dependencies, topologically ordered (every dependency before
 the declarations that use it) and excluding `name` itself, so it is directly usable as the body of
