@@ -292,15 +292,24 @@ noncomputable def SquareIntegrable.toL2Isom : SquareIntegrable ι E P 𝓕 ≃�
 argument recorded in `Referee.Collect` — an upstream proof needs no trust, because the kernel
 rechecked it and anything left unproved arrives as a `sorry` or an extra axiom — they say nothing
 about what the definition *means*. Yet `usedConstantsOf … (includeValue := true)` reports every
-lemma their tactics happened to call: on the declaration above that is the difference between 103
-dependencies and 296, and it is what puts definitions at the top of every degree distribution while
+lemma their tactics happened to call: on the declaration above that is the difference between 132
+dependencies and 280, and it is what puts definitions at the top of every degree distribution while
 `structure`, `inductive` and `typeclass` (whose value contributions are field types and defaults,
 never proofs) show no excess at all.
 
-The walk below is `exprUsedConstants` with one change: at an application of a named constant it
-skips the arguments filling that constant's `Prop`-valued parameters (`constPropMask`). It recurses,
-so a proof nested inside a data field is skipped too — the `by` block above is the second field of a
-`Subtype.mk` sitting inside `toFun`, and is reached by exactly the same rule.
+The walk below is `exprUsedConstants` with one change: at an application that *returns a structure or
+class*, it skips the arguments filling that constant's `Prop`-valued parameters (`constPropMask`).
+It recurses, so a proof nested inside a data field is skipped too — the `by` block above is the
+second field of a `Subtype.mk` sitting inside `toFun`, and is reached by exactly the same rule.
+
+The restriction to structure-returning applications is what keeps the rule true. "The `Prop`
+arguments of an application that returns a structure are that instance's obligations" is a fact
+about bundled structures; "every `Prop` argument is an obligation" is not, and the case it gets
+wrong is choice. `noncomputable def IsPreBrownianReal.mk X h := h.exists_continuous_modification.choose`
+elaborates to `Exists.choose _ p (IsPreBrownianReal.exists_continuous_modification h)`, whose third
+parameter is a proof — so an unrestricted mask dropped the *only* project declaration in the body,
+and the site reported that definition as resting on nothing. `Exists.choose` returns a bare type
+variable, not a structure, so the restriction keeps it. See `constPropMask` for what this costs.
 
 The mask is read off *declared types*, not inferred from the arguments, which is what keeps it cheap
 and context-free: nothing here has to type-check a subterm sitting under binders.
@@ -311,26 +320,47 @@ about the other's case.
 -/
 
 /-- For each parameter position of the constant `fn`, whether that parameter is `Prop`-valued, i.e.
-filled by a proof rather than by data.
+filled by a proof rather than by data — but only when `fn` *returns* a structure or class, since
+that is the case in which its `Prop` parameters really are a bundled instance's obligations. Every
+other constant masks nothing.
 
 Read off `fn`'s *declared type*, which makes this both cheap and independent of any local context:
-telescoping `∀ (x₁ : T₁) … (xₙ : Tₙ), _` binds each parameter as a local hypothesis, so `isProof`
+telescoping `∀ (x₁ : T₁) … (xₙ : Tₙ), R` binds each parameter as a local hypothesis, so `isProof`
 can ask a well-posed question about it even when the argument at that position, in the term being
-walked, sits under binders of its own.
+walked, sits under binders of its own, and leaves `R`'s head constant in hand for the structure test.
 
-Deliberately not restricted to constructors. A structure instance is very often built by *calling*
-something that returns the structure rather than by a constructor literal — `instance :
-NormedAddCommGroup … := Function.Injective.normedAddCommGroup hf hproof …` — and the proof
-obligations are then ordinary arguments to an ordinary function. Masking constructors alone left
-188 of `BrownianMotion`'s 263 non-theorem declarations completely unreduced, all of this shape.
+Keyed on the *return type*, not on `fn` being a constructor. A structure instance is very often
+built by *calling* something that returns the structure rather than by a constructor literal —
+`instance : NormedAddCommGroup … := Function.Injective.normedAddCommGroup hf hproof …` — and the
+proof obligations are then ordinary arguments to an ordinary function. Masking constructors alone
+left 188 of `BrownianMotion`'s 263 non-theorem declarations completely unreduced, all of this shape;
+keying on the return type covers them, because `NormedAddCommGroup β` is a class.
 
-Returns `#[]` — every position data — when `fn` is unknown or its type will not telescope. That is
-the conservative direction: it can only keep edges a correct mask would have dropped, never drop one
-it would have kept. -/
+What the restriction costs, measured over `BrownianMotion`'s 232 exposed definitions: the value walk
+reports 9654 edges unmasked and 6476 with a mask over *every* `Prop` parameter, so the mask removes
+3178; restricted to structure-returning applications it removes 2985 of those 3178, and the count of
+declarations it reduces not at all goes from 97 to 130. Nearly all of the difference is Prop-valued
+*typeclass instances* (`[IsProbabilityMeasure P]` and friends) on type formers such as
+`SimpleProcess` and `ClassD`, whose result is a `Sort` rather than a structure application.
+
+The head constant is taken as written, without `whnf`: a `def F : Type _ := ↥someSubmodule` masks
+nothing even though it unfolds to a `Subtype`. That is the conservative direction, and it avoids
+reducing an arbitrary return type. Note one case the rule does not catch:
+`Classical.indefiniteDescription` returns `{x // p x}`, a `Subtype`, so its proof argument is still
+masked — `Classical.choose`, `Exists.choose` and `Nonempty.some` all return a bare type variable and
+are not.
+
+Returns `#[]` — every position data — when `fn` is unknown, does not return a structure, or its type
+will not telescope. That is the conservative direction: it can only keep edges a correct mask would
+have dropped, never drop one it would have kept. -/
 def constPropMask (fn : Name) : MetaM (Array Bool) := do
-  let some info := (← getEnv).find? fn | return #[]
+  let env ← getEnv
+  let some info := env.find? fn | return #[]
   try
-    Meta.forallTelescopeReducing info.type fun xs _ => xs.mapM Meta.isProof
+    Meta.forallTelescopeReducing info.type fun xs body => do
+      let some head := body.getAppFn.constName? | return #[]
+      unless isStructure env head do return #[]
+      xs.mapM Meta.isProof
   catch _ =>
     return #[]
 
