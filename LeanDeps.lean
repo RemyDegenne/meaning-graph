@@ -25,8 +25,10 @@ this module compensates for:
   recursion helpers) are constants of the project itself, but nobody wrote them; stopping at such a
   name hides what it in turn depends on. `expandThroughInternals` recurses through them, and only
   through them.
-* **`Expr.proj` nodes**: `Expr.foldConsts` walks *through* a projection without ever offering the
-  structure name it carries. `projStructureNames` recovers those names.
+* **`Expr.proj` nodes**: through Lean 4.33, `Expr.foldConsts` walked *through* a projection without
+  ever offering the structure name it carries; core reports it itself since 4.34.
+  `projStructureNames` remains as the proven statement of that recovery, and a guard in
+  `Test/Deps.lean` pins core's fix.
 * **notation**: a notation's macro stores the constants it expands to as pre-resolved `Name` *data*
   inside embedded `Syntax`, invisible to a constant walk. `notationExpansionDeps` reconstructs them.
 * **coercions**: an elaborated term keeps only the underlying `@[coe]` function and drops the
@@ -191,12 +193,17 @@ def projectConstants (env : Environment) (rootPrefix : Name) : Array (Name × Na
 /-- Every structure name carried by an `Expr.proj` node inside `e`, in traversal order and
 possibly with repeats (all consumers dedup).
 
-`Expr.getUsedConstants` does *not* report these: its underlying `Expr.foldConsts` recurses through
-a `.proj S i b` node into `b` without ever offering `S`. So a structure that an elaborated term
-reaches only by projecting one of its fields — never by naming it — is absent from the constant
-list, and would be absent from a declaration's `deps`/`typeDeps`.
+Up to Lean 4.33, `Expr.getUsedConstants` did *not* report these: its underlying `Expr.foldConsts`
+recursed through a `.proj S i b` node into `b` without ever offering `S`. So a structure that an
+elaborated term reaches only by projecting one of its fields — never by naming it — was absent
+from the constant list, and `exprUsedConstants` existed to append this recovery. Core closed the
+gap in 4.34 — `foldConsts` now visits the `.proj` structure name itself — so nothing needs
+appending anymore. This walk is kept as the executable statement of what the recovery must find,
+with its completeness proof in `Proofs/Deps.lean`; a `#guard` in `Test/Deps.lean` pins core's new
+behavior, and if core ever drops the name again, restoring `++ projStructureNames e` in
+`exprUsedConstants` is the fix.
 
-This is a correctness guard, not a fix for an observed failure. Surface-level field access
+This was a correctness guard, not a fix for an observed failure. Surface-level field access
 (`x.field`) elaborates to an application of the projection *function* (`S.field x`), which
 `getUsedConstants` reports normally; bare `.proj` nodes come from the compiler's own recursion
 machinery (`brecOn`, `._f`, `.wf._unary._proof_n`) and from upstream `Equiv`/`Subtype`-style
@@ -236,10 +243,15 @@ where
         | _ => (acc, seen)
       (acc, seen.insert e)
 
-/-- Like `Expr.getUsedConstants`, but also reports the structure name of every `Expr.proj` node
-(see `projStructureNames` for why that name would otherwise be lost). -/
+/-- The constants used by `e`, including the structure name of every `Expr.proj` node.
+
+Since Lean 4.34 this is `Expr.getUsedConstants` unchanged — core's `foldConsts` now visits the
+`.proj` structure name itself, closing the gap `projStructureNames` was appended here to cover
+(see its docstring). The wrapper stays as the named seam every dependency computation goes
+through: if core ever drops the name again — the `#guard`s in `Test/Deps.lean` would catch it —
+the fix is `e.getUsedConstants ++ projStructureNames e` here, and nowhere else. -/
 def exprUsedConstants (e : Expr) : Array Name :=
-  e.getUsedConstants ++ projStructureNames e
+  e.getUsedConstants
 
 /-- One-level "used constants" for a declaration's type (and, if `includeValue`, also its
 value/body), handling inductive constructor types and structure field-default functions: for
