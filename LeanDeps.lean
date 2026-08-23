@@ -178,15 +178,39 @@ def shouldExpose (env : Environment) (rootPrefix : Name) (name : Name) (info : C
 
 /-- All constants belonging to modules whose name has `rootPrefix`, paired with their module
 name, gathered directly from `env.header.moduleData` so that the (typically much larger) set of
-constants from imported libraries is never iterated. -/
+constants from imported libraries is never iterated.
+
+Each name appears exactly once, attributed to the module `env.getModuleIdxFor?` records for it.
+That is not redundant with walking the per-module tables: two modules that are never imported into
+each other can both declare the same name (observed as a lemma copy-pasted between two `ForMathlib`
+files of disjoint subtrees, which `lake build` accepts), and then the name sits in both modules'
+`constNames`. Every downstream consumer is name-keyed — page tags, extracted file stems,
+`declByName`, and the environment queries for docstrings, ranges and dependencies — so the walk
+must pick one occurrence, and it must pick the *same* one those env queries answer for, or the
+declaration would be attributed to one module and sourced from another. -/
 def projectConstants (env : Environment) (rootPrefix : Name) : Array (Name × Name × ConstantInfo) :=
   (Array.range env.header.modules.size).foldl (fun acc idx =>
     let modName := env.header.modules[idx]!.module
     if hasPrefixName modName rootPrefix then
       let data := env.header.moduleData[idx]!
       (Array.zip data.constNames data.constants).foldl
-        (fun acc2 (cname, cinfo) => acc2.push (cname, modName, cinfo)) acc
+        (fun acc2 (cname, cinfo) =>
+          if moduleNameOf env cname == some modName then acc2.push (cname, modName, cinfo)
+          else acc2) acc
     else acc) #[]
+
+/-- Names declared in more than one project module, with the modules that carry them; see
+`projectConstants`, which keeps a single occurrence of each. Exposed separately so `collect` can
+say which copies the site will not show, instead of dropping them silently. -/
+def duplicatedProjectConstants (env : Environment) (rootPrefix : Name) : Array (Name × Array Name) :=
+  let byName := (Array.range env.header.modules.size).foldl (init := ({} : Std.HashMap Name (Array Name)))
+    fun acc idx =>
+      let modName := env.header.modules[idx]!.module
+      if hasPrefixName modName rootPrefix then
+        env.header.moduleData[idx]!.constNames.foldl
+          (fun acc2 cname => acc2.insert cname ((acc2.getD cname #[]).push modName)) acc
+      else acc
+  byName.toArray.filter (·.2.size > 1) |>.qsort (fun a b => a.1.toString < b.1.toString)
 
 /-! ## Constants used by an expression -/
 
