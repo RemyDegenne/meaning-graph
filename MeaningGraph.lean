@@ -49,7 +49,7 @@ type-only edges for theorems) before running them.
 open Lean
 open Lean.Meta
 
-namespace LeanDeps
+namespace MeaningGraph
 
 /-! ## Name classification
 
@@ -325,9 +325,9 @@ noncomputable def SquareIntegrable.toL2Isom : SquareIntegrable ι E P 𝓕 ≃�
 ```
 
 `left_inv` and `right_inv` are proofs, kernel-checked exactly as a theorem's proof is. By the
-argument recorded in `Referee.Collect` — an upstream proof needs no trust, because the kernel
-rechecked it and anything left unproved arrives as a `sorry` or an extra axiom — they say nothing
-about what the definition *means*. Yet `usedConstantsOf … (includeValue := true)` reports every
+argument that an upstream proof needs no trust — the kernel rechecked it, and anything left
+unproved arrives as a `sorry` or an extra axiom — they say nothing about what the definition
+*means*. Yet `usedConstantsOf … (includeValue := true)` reports every
 lemma their tactics happened to call: on the declaration above that is the difference between 132
 dependencies and 280, and it is what puts definitions at the top of every degree distribution while
 `structure`, `inductive` and `typeclass` (whose value contributions are field types and defaults,
@@ -350,9 +350,9 @@ variable, not a structure, so the restriction keeps it. See `constPropMask` for 
 The mask is read off *declared types*, not inferred from the arguments, which is what keeps it cheap
 and context-free: nothing here has to type-check a subterm sitting under binders.
 
-This is deliberately *not* applied to a theorem's own proof. `Referee.meaningDeps` already drops that wholesale
-by taking `typeDeps`, and the two mechanisms are kept separate so that neither has to be correct
-about the other's case.
+This is deliberately *not* applied to a theorem's own proof. A caller that wants a theorem's
+statement alone already drops that wholesale by taking `typeDeps`, and the two mechanisms are kept
+separate so that neither has to be correct about the other's case.
 -/
 
 /-- For each parameter position of the constant `fn`, whether that parameter is `Prop`-valued, i.e.
@@ -446,8 +446,9 @@ private partial def dataWalkGo (e : Expr) : StateT DataWalk MetaM Unit := do
 has no value this applies to.
 
 Only `.defnInfo` — `def`, `abbrev` and `instance`, the kinds that can carry a bundled structure
-instance. A theorem's value is handled by `Referee.meaningDeps` taking `typeDeps`, and `structure`/`inductive`
-contribute field types and defaults rather than a value, with no proof excess to remove.
+instance. A theorem's value is handled by the caller taking `typeDeps` instead, and
+`structure`/`inductive` contribute field types and defaults rather than a value, with no proof
+excess to remove.
 
 Not `@[expose]`, for the same reason as `evalNameExpr?`: the body refers to the `private`
 `dataWalkGo`. Nothing is lost, since no importer needs to unfold this. -/
@@ -868,4 +869,4 @@ a minimal standalone file for `name`. -/
 def transitiveDeps (depsMap : Std.HashMap Name (Array Name)) (name : Name) : Array Name :=
   (topologicalClosure depsMap (depsMap.getD name #[])).filter (· != name)
 
-end LeanDeps
+end MeaningGraph

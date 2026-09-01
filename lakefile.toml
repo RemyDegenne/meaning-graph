@@ -1,8 +1,26 @@
-name = "LeanDeps"
+name = "MeaningGraph"
 version = "0.1.0"
-defaultTargets = ["LeanDeps"]
+defaultTargets = ["MeaningGraph"]
 
 # Deliberately dependency-free: a project that wants to compute what its declarations rest on should
-# not have to take on this repo's build (Verso, SubVerso, MD4Lean, …) to do so. Lean core only.
+# not have to take on a document-generation build (Verso, SubVerso, MD4Lean, …) to do so. Lean core
+# only, and that is a property of this package worth keeping — every `require` added here is one
+# every consumer inherits.
 [[lean_lib]]
-name = "LeanDeps"
+name = "MeaningGraph"
+
+# The `#guard` checks and the theorems, as two targets separate from the library: they are not part
+# of what a consumer imports, and both are checked at elaboration time, so building either one *is*
+# running it.
+#
+# Their modules are `MeaningGraph.Test` and `MeaningGraph.Proofs`, not `Test` and `Proofs`. Module
+# roots are shared across a whole Lake workspace, so a package that claims the top-level name `Test`
+# takes it away from every project that requires it: with the modules at the root, a consumer's own
+# `Test.Foo` resolved to *this* package and the consumer's test build failed with "no such file".
+[[lean_lib]]
+name = "MeaningGraphTest"
+roots = ["MeaningGraph.Test"]
+
+[[lean_lib]]
+name = "MeaningGraphProofs"
+roots = ["MeaningGraph.Proofs"]

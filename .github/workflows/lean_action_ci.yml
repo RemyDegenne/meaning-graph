@@ -1,0 +1,20 @@
+name: Lean Action CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+
+      # `lake build` builds the default target, the library alone. The checks and the theorems are
+      # separate targets, so without this step neither would be checked here.
+      # Both are checked at elaboration time, so building them is running them.
+      - name: Build tests and proofs
+        run: lake build MeaningGraphTest MeaningGraphProofs
